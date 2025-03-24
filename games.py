@@ -1,61 +1,12 @@
-from psnawp_api import PSNAWP
-import os
-from jinja2 import Template
+import argparse
+import datetime
 import json
-from collections import defaultdict
+import typing as t
 
-# Initialize PSNAWP with your authentication token
-# Use an environment variable or secure method instead of hardcoding the token
-# http://ca.account.sony.com/api/v1/ssocookie
+import jinja2
+from psnawp_api import PSNAWP
 
-auth_token = os.getenv("PSN_AUTH_TOKEN", "YOUR_TOKEN_HERE")
-psnawp = PSNAWP(auth_token)
-
-def load_title_stats():
-    bg_user = psnawp.me()
-    stasian_user = psnawp.user(online_id='stasian88')
-
-    bg_stats = list(bg_user.title_stats())
-    stasian_stats = list(stasian_user.title_stats())
-
-    filtered_stasian = [
-        title for title in stasian_stats
-        if title.title_id not in ['CUSA01116_00', 'CUSA02012_00', 'PPSA01651_00']
-    ]
-
-    bg_stats.sort(key=lambda title: title.play_duration, reverse=True)
-    filtered_stasian.sort(key=lambda title: title.play_duration, reverse=True)
-
-    return filtered_stasian, bg_stats
-
-def prepare_aggregated_data(stasian_stats, bg_stats):
-    aggregated_stats = defaultdict(lambda: {'play_count': 0, 'play_duration': 0.0})
-    collect_stats(stasian_stats[:1000], aggregated_stats)
-    collect_stats(bg_stats, aggregated_stats)
-    return aggregated_stats
-
-def collect_stats(titles, aggregated_stats):
-    for title in titles:
-        game_name = getattr(title, 'name', f"Unknown ({title.title_id})")
-        hours = title.play_duration.total_seconds() / 3600
-        aggregated_stats[game_name]['play_count'] += title.play_count
-        aggregated_stats[game_name]['play_duration'] += hours
-
-stasian_titles, bg_titles = load_title_stats()
-aggregated_stats = prepare_aggregated_data(stasian_titles, bg_titles)
-
-total_hours = sum(stats['play_duration'] for stats in aggregated_stats.values())
-total_days = total_hours / 24
-header_text = f"Top Games by Play Duration — {total_hours:.1f} hours ({total_days:.1f} days)"
-
-merged_title_data = [
-    {'title': name, 'play_count': stats['play_count'], 'play_duration': stats['play_duration']}
-    for name, stats in aggregated_stats.items()
-]
-merged_title_data.sort(key=lambda x: x['play_duration'], reverse=True)
-
-html_template = Template("""
-<!DOCTYPE html>
+TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -105,12 +56,13 @@ html_template = Template("""
   </style>
 </head>
 <body>
-  <h2>{{ header }}</h2>
+  <h1>Top PlayStation Games by Play Duration - {{ total_time }}</h1>
   <div class="chart-container">
     <svg style="width: 100%; height: auto;"></svg>
   </div>
   <script>
-    const data = {{ data|safe }}.sort((a, b) => b.play_duration - a.play_duration).slice(0, 1000);
+    let data = {{ data }};
+    data = data.map(x => ({title: x.title, count: x.count, duration: x.duration / 3600}));
 
     const margin = { top: 20, right: 200, bottom: 10, left: 300 },
           containerWidth = document.querySelector(".chart-container").clientWidth;
@@ -125,15 +77,15 @@ html_template = Template("""
       .attr("transform", `translate(${margin.left},${margin.top})`);
 
     const x = d3.scaleLinear()
-      .domain([0, d3.max(data, d => d.play_duration)])
+      .domain([0, d3.max(data, d => d.duration)])
       .range([0, width]);
 
     const color = d3.scaleLinear()
       .domain([
         0,
-        d3.max(data, d => d.play_duration) * 0.33,
-        d3.max(data, d => d.play_duration) * 0.66,
-        d3.max(data, d => d.play_duration)
+        d3.max(data, d => d.duration) * 0.33,
+        d3.max(data, d => d.duration) * 0.66,
+        d3.max(data, d => d.duration)
       ])
       .range(["green", "yellow", "orange", "red"]);
 
@@ -152,33 +104,102 @@ html_template = Template("""
       .attr("transform", `translate(0,0)`)
       .call(d3.axisTop(x).ticks(10));
 
-    chart.selectAll(".bar")
-      .data(data)
-      .enter().append("rect")
+    chart.selectAll(".bar").data(data).enter()
+      .append("rect")
       .attr("class", "bar")
       .attr("y", d => y(d.title))
       .attr("height", y.bandwidth())
       .attr("x", 0)
       .attr("width", 0)
-      .attr("fill", d => color(d.play_duration))
+      .attr("fill", d => color(d.duration))
       .transition()
       .duration(800)
-      .attr("width", d => x(d.play_duration));
+      .attr("width", d => x(d.duration));
 
-    chart.selectAll(".label")
-      .data(data)
-      .enter().append("text")
+    chart.selectAll(".label").data(data).enter()
+      .append("text")
       .attr("x", 0)
       .transition()
       .duration(800)
-      .attr("x", d => x(d.play_duration) + 5)
+      .attr("x", d => x(d.duration) + 5)
       .attr("y", d => y(d.title) + y.bandwidth() / 2)
       .attr("dy", ".35em")
-      .text(d => `${d.play_duration.toFixed(1)}h (${d.play_count}×)`);
+      .text(d => `${d.duration.toFixed(1)}h (${d.count}×)`);
   </script>
 </body>
-</html>
-""")
+</html>"""  # noqa:E501
 
-with open("stasian_titles.html", "w", encoding="utf-8") as f:
-    f.write(html_template.render(data=json.dumps(merged_title_data), header=header_text))
+
+class Stat(t.NamedTuple):
+    title: str
+    count: int
+    duration: int
+
+
+def make_stat(source=None):
+    if not source:
+        return Stat(title="", count=0, duration=0)
+
+    return Stat(
+        title=source.name,
+        count=source.play_count,
+        duration=source.play_duration.total_seconds(),
+    )
+
+
+def load_stats(psn: PSNAWP, limit=None) -> list[Stat]:
+    user, stats_merge = psn.me(), {}
+    for stat_obj in user.title_stats():
+        stat = make_stat(stat_obj)
+        stat_merge = stats_merge.get(stat.title, make_stat())
+        stats_merge[stat.title] = Stat(
+            title=stat.title,
+            count=stat.count + stat_merge.count,
+            duration=stat.duration + stat_merge.duration,
+        )
+
+    stats = list(stats_merge.values())
+    stats.sort(key=lambda s: s.duration, reverse=True)
+
+    if limit:
+        return stats[:limit]
+
+    return stats
+
+
+def aggregate_total(stats: list[Stat]) -> tuple[int, int]:
+    count, time = 0, 0
+    for stat in stats:
+        count += stat.count
+        time += stat.duration
+
+    return count, time
+
+
+def main():
+    parser = argparse.ArgumentParser(description="PSN Game stats")
+    parser.add_argument(
+        "token",
+        help="PSN API token, you can take it there http://ca.account.sony.com/api/v1/ssocookie",
+    )
+    parser.add_argument("-l", "--limit", help="Takes top X games", default=100)
+    parser.add_argument(
+        "-o", "--output", help="Output file name", default="./index.html"
+    )
+    args = parser.parse_args()
+
+    psn = PSNAWP(args.token)
+    stats = load_stats(psn, args.limit)
+    total_count, total_sec = aggregate_total(stats)
+
+    with open(args.output, "w", encoding="utf-8") as f:
+        context = {
+            "data": json.dumps(tuple(x._asdict() for x in stats)),
+            "total_count": total_count,
+            "total_time": datetime.timedelta(seconds=total_sec),
+        }
+        f.write(jinja2.Template(TEMPLATE).render(context))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,14 @@
+attrs==24.2.0
+certifi==2025.1.31
+charset-normalizer==3.4.1
+idna==3.10
+Jinja2==3.1.6
+MarkupSafe==3.0.2
+PSNAWP==2.2.0
+pycountry==24.6.1
+pyrate-limiter==2.10.0
+requests==2.32.3
+requests-ratelimiter==0.7.0
+ruff==0.11.2
+typing_extensions==4.12.2
+urllib3==2.3.0
